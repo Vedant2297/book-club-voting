@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import html
 import re
+import unicodedata
 import uuid
 
 import pandas as pd
@@ -30,7 +31,6 @@ SUPABASE_PUBLISHABLE_KEY = st.secrets["supabase"]["publishable_key"]
 SUPABASE_SECRET_KEY = st.secrets["supabase"]["secret_key"]
 
 ADMIN_PASSWORD_HASH = st.secrets["admin"]["password_hash"]
-
 GOOGLE_BOOKS_API_KEY = st.secrets["google"]["books_api_key"]
 
 
@@ -72,10 +72,6 @@ if "info_book" not in st.session_state:
 st.markdown(
     """
 <style>
-
-/* ------------------------------------------------------------
-   GLOBAL
------------------------------------------------------------- */
 
 .stApp {
     background: #faf9f6;
@@ -119,9 +115,9 @@ footer {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    SIDEBAR
------------------------------------------------------------- */
+========================================================== */
 
 section[data-testid="stSidebar"] {
     background:
@@ -185,9 +181,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
-   PAGE HEADER
------------------------------------------------------------- */
+/* ==========================================================
+   HEADERS
+========================================================== */
 
 .round-label {
     font-size: 0.88rem;
@@ -213,9 +209,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    BOOK CARDS
------------------------------------------------------------- */
+========================================================== */
 
 .book-card {
     background: #ffffff;
@@ -281,9 +277,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    BOOK INFO
------------------------------------------------------------- */
+========================================================== */
 
 .info-card {
     height: 410px;
@@ -333,9 +329,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    SELECTION PANEL
------------------------------------------------------------- */
+========================================================== */
 
 .selection-panel {
     background: #ffffff;
@@ -398,9 +394,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
-   BOOK OF THE MONTH RATING
------------------------------------------------------------- */
+/* ==========================================================
+   BOOK OF THE MONTH
+========================================================== */
 
 .month-book-section {
     margin-top: 3.5rem;
@@ -490,9 +486,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    RESULTS
------------------------------------------------------------- */
+========================================================== */
 
 .winner-card {
     background: #222424;
@@ -516,9 +512,9 @@ section[data-testid="stSidebar"] div.stButton > button[kind="primary"] {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    BUTTONS
------------------------------------------------------------- */
+========================================================== */
 
 div.stButton > button {
     border-radius: 9px;
@@ -543,9 +539,9 @@ div.stButton > button:disabled {
 }
 
 
-/* ------------------------------------------------------------
+/* ==========================================================
    MOBILE
------------------------------------------------------------- */
+========================================================== */
 
 @media (max-width: 900px) {
 
@@ -642,14 +638,325 @@ def password_ok(password: str) -> bool:
 
 
 # ============================================================
-# GOOGLE BOOKS
+# GOOGLE BOOKS HELPERS
+# ============================================================
+
+def normalise_book_text(value):
+
+    if not value:
+        return ""
+
+    value = unicodedata.normalize(
+        "NFKD",
+        str(value),
+    )
+
+    value = "".join(
+        char
+        for char in value
+        if not unicodedata.combining(char)
+    )
+
+    value = value.lower()
+
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip()
+
+    return value
+
+
+def compact_book_text(value):
+
+    return re.sub(
+        r"[^a-z0-9]",
+        "",
+        normalise_book_text(value),
+    )
+
+
+def google_books_search(
+    query,
+    max_results=40,
+):
+
+    response = requests.get(
+        "https://www.googleapis.com/books/v1/volumes",
+        params={
+            "q": query,
+            "maxResults": max_results,
+            "printType": "books",
+            "key": GOOGLE_BOOKS_API_KEY,
+        },
+        timeout=12,
+    )
+
+    response.raise_for_status()
+
+    return (
+        response
+        .json()
+        .get(
+            "items",
+            [],
+        )
+    )
+
+
+def score_google_book(
+    item,
+    wanted_title,
+    wanted_author,
+):
+
+    info = item.get(
+        "volumeInfo",
+        {},
+    )
+
+    result_title = (
+        info.get("title")
+        or ""
+    )
+
+    result_authors = (
+        info.get("authors")
+        or []
+    )
+
+    wanted_title_norm = (
+        normalise_book_text(
+            wanted_title
+        )
+    )
+
+    result_title_norm = (
+        normalise_book_text(
+            result_title
+        )
+    )
+
+    wanted_title_compact = (
+        compact_book_text(
+            wanted_title
+        )
+    )
+
+    result_title_compact = (
+        compact_book_text(
+            result_title
+        )
+    )
+
+    wanted_author_norm = (
+        normalise_book_text(
+            wanted_author
+        )
+    )
+
+    wanted_author_compact = (
+        compact_book_text(
+            wanted_author
+        )
+    )
+
+    score = 0
+
+    # --------------------------------------------------------
+    # TITLE MATCH
+    # --------------------------------------------------------
+
+    if (
+        result_title_compact
+        == wanted_title_compact
+    ):
+        score += 100
+
+    elif (
+        wanted_title_norm
+        and result_title_norm
+        and (
+            wanted_title_norm
+            in result_title_norm
+            or result_title_norm
+            in wanted_title_norm
+        )
+    ):
+        score += 60
+
+    else:
+
+        wanted_words = set(
+            wanted_title_norm.split()
+        )
+
+        result_words = set(
+            result_title_norm.split()
+        )
+
+        if wanted_words:
+
+            overlap = (
+                len(
+                    wanted_words
+                    & result_words
+                )
+                / len(
+                    wanted_words
+                )
+            )
+
+            score += int(
+                overlap * 40
+            )
+
+    # --------------------------------------------------------
+    # AUTHOR MATCH
+    # --------------------------------------------------------
+
+    if wanted_author:
+
+        author_match = False
+
+        for result_author in result_authors:
+
+            result_author_norm = (
+                normalise_book_text(
+                    result_author
+                )
+            )
+
+            result_author_compact = (
+                compact_book_text(
+                    result_author
+                )
+            )
+
+            if (
+                result_author_compact
+                == wanted_author_compact
+            ):
+                score += 80
+                author_match = True
+                break
+
+            if (
+                wanted_author_norm
+                and result_author_norm
+                and (
+                    wanted_author_norm
+                    in result_author_norm
+                    or result_author_norm
+                    in wanted_author_norm
+                )
+            ):
+                score += 45
+                author_match = True
+                break
+
+        if not author_match:
+            score -= 25
+
+    # --------------------------------------------------------
+    # LANGUAGE
+    # --------------------------------------------------------
+
+    language = (
+        info.get("language")
+        or ""
+    ).lower()
+
+    if language == "en":
+        score += 35
+
+    elif language:
+        score -= 80
+
+    # --------------------------------------------------------
+    # METADATA QUALITY
+    # --------------------------------------------------------
+
+    if info.get("imageLinks"):
+        score += 15
+
+    if info.get("description"):
+        score += 8
+
+    if info.get("pageCount"):
+        score += 5
+
+    if info.get("categories"):
+        score += 5
+
+    return score
+
+
+def choose_best_google_book(
+    items,
+    title,
+    author,
+):
+
+    if not items:
+        return None
+
+    scored = []
+
+    for item in items:
+
+        score = score_google_book(
+            item,
+            title,
+            author,
+        )
+
+        scored.append(
+            (
+                score,
+                item,
+            )
+        )
+
+    scored.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    if not scored:
+        return None
+
+    best_score, best_item = (
+        scored[0]
+    )
+
+    # Prevent unrelated books being
+    # attached to nominations.
+    if best_score < 90:
+        return None
+
+    return best_item
+
+
+# ============================================================
+# GOOGLE BOOKS METADATA
 # ============================================================
 
 @st.cache_data(
     show_spinner=False,
     ttl=60 * 60 * 24 * 30,
 )
-def get_book_metadata(title, author):
+def get_book_metadata(
+    title,
+    author,
+):
 
     fallback = {
         "cover_url": None,
@@ -661,173 +968,60 @@ def get_book_metadata(title, author):
 
     try:
 
-        query = f'intitle:"{title}"'
+        # ----------------------------------------------------
+        # SEARCH 1: TITLE + AUTHOR
+        # ----------------------------------------------------
 
-        if author:
-            query += f' inauthor:"{author}"'
-
-        response = requests.get(
-            "https://www.googleapis.com/books/v1/volumes",
-            params={
-                "q": query,
-                "maxResults": 40,
-                "printType": "books",
-                "langRestrict": "en",
-                "key": GOOGLE_BOOKS_API_KEY,
-            },
-            timeout=10,
-        )
-
-        response.raise_for_status()
-
-        items = response.json().get(
-            "items",
-            [],
-        )
-
-        if not items:
-            return fallback
-
-        title_lower = (
-            title
-            .lower()
-            .strip()
-        )
-
-        author_lower = (
-            author
-            .lower()
-            .strip()
+        query = (
+            f"{title} {author}"
             if author
-            else ""
+            else title
         )
 
-        candidates = []
-
-        for item in items:
-
-            info = item.get(
-                "volumeInfo",
-                {},
+        items = (
+            google_books_search(
+                query
             )
-
-            result_title = (
-                info.get(
-                    "title",
-                    "",
-                )
-                .lower()
-                .strip()
-            )
-
-            result_authors = [
-                str(a)
-                .lower()
-                .strip()
-                for a in info.get(
-                    "authors",
-                    [],
-                )
-            ]
-
-            language = (
-                info.get(
-                    "language",
-                    "",
-                )
-                .lower()
-                .strip()
-            )
-
-            # Explicitly reject non-English editions.
-            if (
-                language
-                and language != "en"
-            ):
-                continue
-
-            score = 0
-
-            # ------------------------------------------------
-            # TITLE
-            # ------------------------------------------------
-
-            if (
-                result_title
-                == title_lower
-            ):
-                score += 50
-
-            elif (
-                title_lower
-                in result_title
-                or result_title
-                in title_lower
-            ):
-                score += 25
-
-            else:
-                continue
-
-            # ------------------------------------------------
-            # AUTHOR
-            # ------------------------------------------------
-
-            if author_lower:
-
-                if any(
-                    author_lower == a
-                    for a in result_authors
-                ):
-                    score += 50
-
-                elif any(
-                    author_lower in a
-                    or a in author_lower
-                    for a in result_authors
-                ):
-                    score += 25
-
-                else:
-                    continue
-
-            # ------------------------------------------------
-            # QUALITY
-            # ------------------------------------------------
-
-            if language == "en":
-                score += 30
-
-            if info.get("imageLinks"):
-                score += 12
-
-            if info.get("description"):
-                score += 10
-
-            if info.get("pageCount"):
-                score += 5
-
-            if info.get("categories"):
-                score += 5
-
-            candidates.append(
-                (
-                    score,
-                    item,
-                )
-            )
-
-        if not candidates:
-            return fallback
-
-        candidates.sort(
-            key=lambda x: x[0],
-            reverse=True,
         )
 
         best_item = (
-            candidates[0][1]
+            choose_best_google_book(
+                items,
+                title,
+                author,
+            )
         )
+
+        # ----------------------------------------------------
+        # SEARCH 2: TITLE ONLY
+        # ----------------------------------------------------
+
+        if not best_item:
+
+            items = (
+                google_books_search(
+                    title
+                )
+            )
+
+            best_item = (
+                choose_best_google_book(
+                    items,
+                    title,
+                    author,
+                )
+            )
+
+        if not best_item:
+
+            print(
+                "No confident Google Books match:",
+                title,
+                "-",
+                author,
+            )
+
+            return fallback
 
         info = best_item.get(
             "volumeInfo",
@@ -838,9 +1032,9 @@ def get_book_metadata(title, author):
         # COVER
         # ----------------------------------------------------
 
-        image_links = info.get(
-            "imageLinks",
-            {},
+        image_links = (
+            info.get("imageLinks")
+            or {}
         )
 
         cover_url = (
@@ -900,13 +1094,17 @@ def get_book_metadata(title, author):
         # ----------------------------------------------------
 
         description = clean_html(
-            info.get("description")
+            info.get(
+                "description"
+            )
         )
 
         return {
             "cover_url": cover_url,
-            "page_count": info.get(
-                "pageCount"
+            "page_count": (
+                info.get(
+                    "pageCount"
+                )
             ),
             "primary_genre": (
                 primary_genre
@@ -916,6 +1114,7 @@ def get_book_metadata(title, author):
             ),
             "description": (
                 description
+                or None
             ),
         }
 
@@ -923,6 +1122,9 @@ def get_book_metadata(title, author):
 
         print(
             "Google Books error:",
+            title,
+            "-",
+            author,
             repr(e),
         )
 
@@ -1100,7 +1302,7 @@ def toggle_book(title):
 
 
 # ============================================================
-# RESULTS CALCULATION
+# RESULTS
 # ============================================================
 
 def build_results(votes):
@@ -1300,15 +1502,9 @@ def create_round(
                 "id": str(
                     uuid.uuid4()
                 ),
-                "round_id": (
-                    round_id
-                ),
-                "title": (
-                    current_title
-                ),
-                "author": (
-                    current_author
-                ),
+                "round_id": round_id,
+                "title": current_title,
+                "author": current_author,
                 "cover_url": (
                     current_metadata.get(
                         "cover_url"
@@ -1341,9 +1537,7 @@ def create_round(
                 "id": str(
                     uuid.uuid4()
                 ),
-                "round_id": (
-                    round_id
-                ),
+                "round_id": round_id,
                 "title": (
                     book["title"]
                 ),
@@ -1393,6 +1587,229 @@ def create_round(
         )
 
     return round_id
+
+
+# ============================================================
+# REFRESH EXISTING METADATA
+# ============================================================
+
+def refresh_round_metadata(
+    round_id,
+):
+
+    updated = []
+    unmatched = []
+
+    # Force fresh API lookups.
+    get_book_metadata.clear()
+
+    # --------------------------------------------------------
+    # NOMINATED BOOKS
+    # --------------------------------------------------------
+
+    books_response = (
+        admin_supabase
+        .table("round_books")
+        .select("*")
+        .eq(
+            "round_id",
+            round_id,
+        )
+        .order(
+            "display_order"
+        )
+        .execute()
+    )
+
+    books = (
+        books_response.data
+        or []
+    )
+
+    for book in books:
+
+        title = (
+            book.get("title")
+            or ""
+        )
+
+        author = (
+            book.get("author")
+            or ""
+        )
+
+        metadata = (
+            get_book_metadata(
+                title,
+                author,
+            )
+        )
+
+        has_metadata = any(
+            [
+                metadata.get(
+                    "cover_url"
+                ),
+                metadata.get(
+                    "page_count"
+                ),
+                metadata.get(
+                    "primary_genre"
+                ),
+                metadata.get(
+                    "description"
+                ),
+            ]
+        )
+
+        if not has_metadata:
+
+            label = title
+
+            if author:
+                label += (
+                    f" — {author}"
+                )
+
+            unmatched.append(
+                label
+            )
+
+            continue
+
+        (
+            admin_supabase
+            .table("round_books")
+            .update(
+                {
+                    "cover_url": (
+                        metadata.get(
+                            "cover_url"
+                        )
+                    ),
+                    "page_count": (
+                        metadata.get(
+                            "page_count"
+                        )
+                    ),
+                    "primary_genre": (
+                        metadata.get(
+                            "primary_genre"
+                        )
+                    ),
+                    "secondary_genre": (
+                        metadata.get(
+                            "secondary_genre"
+                        )
+                    ),
+                    "description": (
+                        metadata.get(
+                            "description"
+                        )
+                    ),
+                }
+            )
+            .eq(
+                "id",
+                book["id"],
+            )
+            .execute()
+        )
+
+        updated.append(
+            title
+        )
+
+    # --------------------------------------------------------
+    # CURRENT BOOK
+    # --------------------------------------------------------
+
+    current_response = (
+        admin_supabase
+        .table("current_books")
+        .select("*")
+        .eq(
+            "round_id",
+            round_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    if current_response.data:
+
+        current = (
+            current_response.data[0]
+        )
+
+        current_title = (
+            current.get("title")
+            or ""
+        )
+
+        current_author = (
+            current.get("author")
+            or ""
+        )
+
+        metadata = (
+            get_book_metadata(
+                current_title,
+                current_author,
+            )
+        )
+
+        if metadata.get(
+            "cover_url"
+        ):
+
+            (
+                admin_supabase
+                .table(
+                    "current_books"
+                )
+                .update(
+                    {
+                        "cover_url": (
+                            metadata.get(
+                                "cover_url"
+                            )
+                        )
+                    }
+                )
+                .eq(
+                    "id",
+                    current["id"],
+                )
+                .execute()
+            )
+
+        else:
+
+            label = (
+                current_title
+            )
+
+            if current_author:
+
+                label += (
+                    f" — "
+                    f"{current_author}"
+                )
+
+            if (
+                label
+                not in unmatched
+            ):
+
+                unmatched.append(
+                    label
+                )
+
+    return (
+        updated,
+        unmatched,
+    )
 
 
 # ============================================================
@@ -1500,10 +1917,6 @@ active_round = (
 
 if admin_mode:
 
-    # --------------------------------------------------------
-    # LOGIN
-    # --------------------------------------------------------
-
     if not st.session_state.admin_authed:
 
         st.markdown(
@@ -1551,10 +1964,6 @@ Enter the admin password to continue.
                     "Incorrect password."
                 )
 
-    # --------------------------------------------------------
-    # ADMIN DASHBOARD
-    # --------------------------------------------------------
-
     else:
 
         st.markdown(
@@ -1586,9 +1995,9 @@ Create rounds, manage voting and review results.
 
         st.divider()
 
-        # ----------------------------------------------------
+        # ====================================================
         # CREATE ROUND
-        # ----------------------------------------------------
+        # ====================================================
 
         st.subheader(
             "Create new voting round"
@@ -1701,25 +2110,19 @@ Create rounds, manage voting and review results.
                     if book["title"]
                 ]
 
-                if not (
-                    round_name.strip()
-                ):
+                if not round_name.strip():
 
                     st.error(
                         "Enter a round name."
                     )
 
-                elif not (
-                    current_title.strip()
-                ):
+                elif not current_title.strip():
 
                     st.error(
                         "Enter the current book."
                     )
 
-                elif len(
-                    cleaned
-                ) < 3:
+                elif len(cleaned) < 3:
 
                     st.error(
                         "Enter at least 3 nominated books."
@@ -1755,9 +2158,9 @@ Create rounds, manage voting and review results.
 
                     st.rerun()
 
-        # ----------------------------------------------------
+        # ====================================================
         # EXISTING ROUNDS
-        # ----------------------------------------------------
+        # ====================================================
 
         st.divider()
 
@@ -1847,7 +2250,8 @@ Create rounds, manage voting and review results.
             )
 
             st.write(
-                f"**Votes submitted:** {len(rvotes)}"
+                f"**Votes submitted:** "
+                f"{len(rvotes)}"
             )
 
             action1, action2 = (
@@ -1891,6 +2295,65 @@ Create rounds, manage voting and review results.
 
                         st.rerun()
 
+            # =================================================
+            # REFRESH METADATA BUTTON
+            # =================================================
+
+            st.write("")
+
+            if st.button(
+                "Refresh book metadata",
+                use_container_width=True,
+                key=(
+                    f"refresh_metadata_"
+                    f"{selected_round_id}"
+                ),
+            ):
+
+                with st.spinner(
+                    "Refreshing covers and book information..."
+                ):
+
+                    updated, unmatched = (
+                        refresh_round_metadata(
+                            selected_round_id
+                        )
+                    )
+
+                if updated:
+
+                    st.success(
+                        f"Metadata refreshed for "
+                        f"{len(updated)} nominated "
+                        f"book"
+                        f"{'s' if len(updated) != 1 else ''}."
+                    )
+
+                if unmatched:
+
+                    st.warning(
+                        "Google Books couldn't confidently "
+                        "match:\n\n"
+                        + "\n".join(
+                            f"- {book}"
+                            for book
+                            in unmatched
+                        )
+                    )
+
+                if (
+                    not updated
+                    and not unmatched
+                ):
+
+                    st.info(
+                        "There were no books to refresh."
+                    )
+
+            # =================================================
+            # CURRENT BOOK
+            # =================================================
+
             if rcurrent:
 
                 current_author = (
@@ -1901,7 +2364,9 @@ Create rounds, manage voting and review results.
                 )
 
                 current_text = (
-                    rcurrent["title"]
+                    rcurrent[
+                        "title"
+                    ]
                 )
 
                 if current_author:
@@ -1911,8 +2376,13 @@ Create rounds, manage voting and review results.
                     )
 
                 st.write(
-                    f"**Current book:** {current_text}"
+                    f"**Current book:** "
+                    f"{current_text}"
                 )
+
+            # =================================================
+            # BOOK TABLE
+            # =================================================
 
             if rbooks:
 
@@ -1946,6 +2416,10 @@ Create rounds, manage voting and review results.
                     hide_index=True,
                     use_container_width=True,
                 )
+
+            # =================================================
+            # ADMIN RESULTS
+            # =================================================
 
             if not rvotes.empty:
 
@@ -2021,7 +2495,7 @@ Check back when the next round opens.
         )
 
         # ----------------------------------------------------
-        # REMOVE STALE SELECTIONS
+        # REMOVE OLD SELECTIONS
         # ----------------------------------------------------
 
         valid_titles = {
@@ -2077,21 +2551,11 @@ Check back when the next round opens.
 
                 st.rerun()
 
-        # ----------------------------------------------------
-        # NOT ENOUGH BOOKS
-        # ----------------------------------------------------
-
-        elif len(
-            books
-        ) < 3:
+        elif len(books) < 3:
 
             st.warning(
                 "This voting round doesn't have enough nominated books yet."
             )
-
-        # ----------------------------------------------------
-        # VOTING
-        # ----------------------------------------------------
 
         else:
 
@@ -2180,9 +2644,9 @@ Check back when the next round opens.
                                 == book_id
                             )
 
-                            # ---------------------------------
+                            # =================================
                             # INFO VIEW
-                            # ---------------------------------
+                            # =================================
 
                             if showing_info:
 
@@ -2261,9 +2725,9 @@ Check back when the next round opens.
 
                                     st.rerun()
 
-                            # ---------------------------------
+                            # =================================
                             # COVER VIEW
-                            # ---------------------------------
+                            # =================================
 
                             else:
 
@@ -2316,9 +2780,9 @@ Cover unavailable
 
                                     st.rerun()
 
-                            # ---------------------------------
+                            # =================================
                             # SELECT
-                            # ---------------------------------
+                            # =================================
 
                             selected = (
                                 title
@@ -2455,7 +2919,7 @@ Cover unavailable
                 )
 
             # =================================================
-            # BOOK OF THE MONTH RATING
+            # BOOK OF THE MONTH
             # =================================================
 
             st.markdown(
@@ -2493,7 +2957,7 @@ Cover unavailable
                     )
                 )
 
-                rating_outer_left, rating_area, rating_outer_right = (
+                outer_left, rating_area, outer_right = (
                     st.columns(
                         [
                             0.7,
@@ -2515,9 +2979,9 @@ Cover unavailable
                         )
                     )
 
-                    # -----------------------------------------
+                    # =========================================
                     # CURRENT BOOK COVER
-                    # -----------------------------------------
+                    # =========================================
 
                     with rating_left:
 
@@ -2552,9 +3016,9 @@ Cover unavailable
                             unsafe_allow_html=True,
                         )
 
-                    # -----------------------------------------
+                    # =========================================
                     # RATING
-                    # -----------------------------------------
+                    # =========================================
 
                     with rating_right:
 
@@ -2610,11 +3074,8 @@ Cover unavailable
             )
 
             ready = (
-                len(
-                    selected
-                ) == 3
-                and rating
-                is not None
+                len(selected) == 3
+                and rating is not None
             )
 
             st.write("")
@@ -2787,7 +3248,5 @@ There is no active voting round at the moment.
 
                 st.metric(
                     "Votes submitted",
-                    len(
-                        votes
-                    ),
+                    len(votes),
                 )
